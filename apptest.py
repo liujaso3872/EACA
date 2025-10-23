@@ -28,13 +28,16 @@ class App():
 
         chatLabel = tkinter.Label(chatInputFrame, text="Chat:")
         Text = tkinter.Text(chatInputFrame)
-        TextButton = tkinter.Button(chatInputFrame, text="Chat!", command=lambda: self.createText(Text.get("1.0", "end-1c") , True))
+        TextButton = tkinter.Button(chatInputFrame, text="Chat!", command=lambda: self.handleuserInputtedText(Text.get("1.0", "end-1c")))
 
         chatLabel.grid(column=0, row=0, columnspan=1)
         Text.grid(column=1, row=0, columnspan=4)
         TextButton.grid(column=2, row=0)
         Text.focus_set()
         return Text
+    def handleuserInputtedText(self, txt):
+        print("do stuff with the text blud", txt)
+        self.createText(txt, True)
     def createText(self, txt, isUser):
         Text = tkinter.Text(self.chatFrame, borderwidth=3)
         if isUser:
