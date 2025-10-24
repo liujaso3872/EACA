@@ -1,10 +1,9 @@
-# src/models.py
+# src/models.py (FIXED VERSION)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Dict, Optional, Tuple
-from .feature_extractor import TextFeatureExtractor, AudioFeatureExtractor
 
 class GatedCrossModalAttention(nn.Module):
     """
@@ -25,14 +24,14 @@ class GatedCrossModalAttention(nn.Module):
         V = self.audio_value(audio_features)
         
         # Compute attention scores
-        attention_scores = torch.bmm(Q.unsqueeze(1), K.unsqueeze(2)).squeeze(-1)  # [batch, 1]
+        attention_scores = torch.bmm(Q.unsqueeze(1), K.unsqueeze(2)).squeeze(-1)
         attention_weights = F.softmax(attention_scores, dim=-1)
         
         # Compute attended audio features
         attended_audio = attention_weights * V
         
         # Compute gating mechanism based on audio quality
-        gate = torch.sigmoid(self.gate_proj(audio_features))  # [batch, 1]
+        gate = torch.sigmoid(self.gate_proj(audio_features))
         
         # Apply gate to attended audio
         gated_audio = gate * attended_audio
@@ -60,9 +59,9 @@ class ContextAwareHierarchicalMultimodalEncoder(nn.Module):
         self.gated_attention = GatedCrossModalAttention(text_dim, audio_dim, hidden_dim)
         
         # Classification head
-        fusion_dim = text_dim + hidden_dim  # text + gated audio features
+        fusion_dim = text_dim + hidden_dim
         self.classifier = nn.Sequential(
-            nn.Linear(fusion_dim + hidden_dim * 2, 512),  # + context features
+            nn.Linear(fusion_dim + hidden_dim * 2, 512),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(512, 256),
@@ -72,31 +71,23 @@ class ContextAwareHierarchicalMultimodalEncoder(nn.Module):
         )
         
     def forward(self, current_features, history_features=None):
-        """
-        Args:
-            current_features: Dict with 'text', 'audio', 'multimodal'
-            history_features: List of previous utterance features
-        """
         batch_size = current_features['text'].size(0)
         
         # Process current utterance
-        text_features = current_features['text']  # [batch, 768]
-        audio_features = current_features['audio']  # [batch, 168]
+        text_features = current_features['text']
+        audio_features = current_features['audio']
         
         # Gated cross-modal fusion
         gated_audio, gate_values = self.gated_attention(text_features, audio_features)
-        current_fusion = torch.cat([text_features, gated_audio], dim=-1)  # [batch, 768 + 256]
+        current_fusion = torch.cat([text_features, gated_audio], dim=-1)
         
         # Process context if available
         if history_features is not None and len(history_features) > 0:
-            # Stack historical text features
             history_texts = [hf['text'] for hf in history_features[-self.context_window:]]
             if len(history_texts) > 0:
-                history_tensor = torch.stack(history_texts, dim=1)  # [batch, seq_len, 768]
-                
-                # Encode context with LSTM
+                history_tensor = torch.stack(history_texts, dim=1)
                 context_out, (hidden, _) = self.context_lstm(history_tensor)
-                context_features = torch.cat([hidden[0], hidden[1]], dim=-1)  # [batch, hidden_dim*2]
+                context_features = torch.cat([hidden[0], hidden[1]], dim=-1)
             else:
                 context_features = torch.zeros(batch_size, self.context_lstm.hidden_size * 2).to(text_features.device)
         else:
@@ -112,204 +103,169 @@ class ContextAwareHierarchicalMultimodalEncoder(nn.Module):
             'context_features': context_features
         }
 
-class DynamicTemporalGraphLayer(nn.Module):
+class MultiScaleTemporalEncoder(nn.Module):
     """
-    Single layer of Dynamic Temporal Graph Network
+    Captures temporal dependencies at multiple scales using parallel convolutions
     """
-    def __init__(self, input_dim, hidden_dim, num_heads=4):
+    def __init__(self, input_dim, hidden_dim=256, scales=[1, 3, 5]):
         super().__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        
-        # Graph attention components
-        self.attention = nn.MultiheadAttention(
-            embed_dim=input_dim,
-            num_heads=num_heads,
-            batch_first=True
-        )
-        
-        # Temporal convolution
-        self.temporal_conv = nn.Conv1d(
-            input_dim, hidden_dim, 
-            kernel_size=3, 
-            padding=1
-        )
-        
-        # Edge weight projection
-        self.edge_proj = nn.Linear(1, input_dim)  # Project edge weights to feature dimension
-        
-        # Fusion and normalization
-        self.fusion_proj = nn.Linear(input_dim + hidden_dim, hidden_dim)
+        self.scales = scales
+        self.convs = nn.ModuleList([
+            nn.Conv1d(input_dim, hidden_dim, kernel_size=scale, padding=scale//2)
+            for scale in scales
+        ])
+        self.attention = nn.MultiheadAttention(hidden_dim, num_heads=4, batch_first=True)
         self.layer_norm = nn.LayerNorm(hidden_dim)
         
-    def forward(self, node_features, edge_weights, attention_mask=None):
-        """
-        Args:
-            node_features: [batch, seq_len, input_dim]
-            edge_weights: [batch, seq_len, seq_len]
-            attention_mask: [batch, seq_len, seq_len]
-        """
-        batch_size, seq_len, _ = node_features.shape
+    def forward(self, x):
+        batch_size, seq_len, features = x.shape
+        x_t = x.transpose(1, 2)
         
-        # Apply edge weights before attention by modifying the attention computation
-        if edge_weights is not None:
-            # Use edge weights as additional bias in attention
-            # Expand edge weights to match attention dimension
-            edge_bias = edge_weights.unsqueeze(-1)
-            edge_bias = edge_bias.expand(-1, -1, -1, self.input_dim)
-        else:
-            edge_bias = None
+        scale_features = []
+        for conv in self.convs:
+            conv_out = conv(x_t)
+            conv_out = conv_out.transpose(1, 2)
+            scale_features.append(conv_out)
         
-        # Convert attention mask format for MultiheadAttention
-        if attention_mask is not None:
-            attn_mask = attention_mask
-            if attn_mask.dim() == 3:
-                # Expand mask for multi-head attention
-                attn_mask = attn_mask.repeat(self.num_heads, 1, 1)
-        else:
-            attn_mask = None
-        
-        # Graph Attention
-        attended_features, attention_weights = self.attention(
-            query=node_features,
-            key=node_features,
-            value=node_features,
-            attn_mask=attn_mask
+        multi_scale = torch.stack(scale_features, dim=-1).mean(dim=-1)
+        attended, _ = self.attention(multi_scale, multi_scale, multi_scale)
+        output = self.layer_norm(attended + multi_scale)
+        return output
+
+class DynamicFeatureGating(nn.Module):
+    """
+    Novel feature gating mechanism that adapts to input quality
+    """
+    def __init__(self, feature_dim, gate_dim=64):
+        super().__init__()
+        self.quality_estimator = nn.Sequential(
+            nn.Linear(feature_dim, gate_dim),
+            nn.ReLU(),
+            nn.Linear(gate_dim, 1),
+            nn.Sigmoid()
+        )
+        self.feature_enhancer = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.Tanh()
         )
         
-        # Apply edge weights as post-processing (element-wise multiplication)
-        if edge_weights is not None:
-            # We need to apply edge weights per node
-            # For each node, multiply its features by the average edge weight to its neighbors
-            edge_weights_normalized = F.softmax(edge_weights, dim=-1)  # Normalize edge weights
-            attended_features = torch.bmm(edge_weights_normalized, attended_features)
+    def forward(self, features):
+        # Estimate feature quality (confidence score)
+        quality_scores = self.quality_estimator(features)
         
-        # Temporal convolution
-        temporal_features = node_features.transpose(1, 2)
-        temporal_features = self.temporal_conv(temporal_features)
-        temporal_features = temporal_features.transpose(1, 2)
+        # Enhance features
+        enhanced_features = self.feature_enhancer(features)
         
-        # Fusion
-        combined = torch.cat([attended_features, temporal_features], dim=-1)
-        output = self.fusion_proj(combined)
-        output = self.layer_norm(output)
+        # Dynamic gating: blend original and enhanced features based on quality
+        gated_output = quality_scores * enhanced_features + (1 - quality_scores) * features
         
-        return output, attention_weights
+        return gated_output, quality_scores
 
-class DynamicTemporalGraphNetwork(nn.Module):
-    """
-    DTGN: Dynamic Temporal Graph Network for conversation modeling
-    """
-    def __init__(self, config, input_dim=936, hidden_dim=256, num_layers=3, num_classes=7):
+class M3FNet(nn.Module):
+    def __init__(self, config, text_dim=768, audio_dim=168, hidden_dim=256, num_classes=7):
         super().__init__()
         self.config = config
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
         
-        # Input projection
-        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        # Text pathway
+        self.text_encoder = MultiScaleTemporalEncoder(text_dim, hidden_dim)
+        self.text_gating = DynamicFeatureGating(hidden_dim)
         
-        # Graph layers
-        self.graph_layers = nn.ModuleList([
-            DynamicTemporalGraphLayer(
-                hidden_dim, 
-                hidden_dim
-            ) for _ in range(num_layers)
-        ])
+        # Audio pathway  
+        self.audio_encoder = MultiScaleTemporalEncoder(audio_dim, hidden_dim)
+        self.audio_gating = DynamicFeatureGating(hidden_dim)
         
-        # Output classification
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, num_classes)
+        # Cross-modal fusion
+        self.cross_modal_attention = nn.MultiheadAttention(
+            hidden_dim * 2, 
+            num_heads=config.M3FNET_ATTENTION_HEADS, 
+            batch_first=True
+        )
+        self.cross_modal_dropout = nn.Dropout(config.M3FNET_ATTENTION_DROPOUT)
+        
+        # Context modeling - FIXED LSTM (proper dropout)
+        self.context_lstm = nn.LSTM(
+            hidden_dim * 2, 
+            hidden_dim, 
+            bidirectional=True, 
+            batch_first=True,
+            num_layers=config.M3FNET_LSTM_LAYERS,
+            dropout=config.M3FNET_LSTM_DROPOUT
         )
         
-    def build_temporal_edges(self, utterance_ids, speakers, max_time_gap=5):
-        """
-        Build dynamic edge weights based on temporal proximity and speaker identity
-        """
-        batch_size, seq_len = utterance_ids.shape
+        # Classification head with dropout
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim * 4, 512),
+            nn.ReLU(),
+            nn.Dropout(config.M3FNET_CLASSIFIER_DROPOUT_1),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(config.M3FNET_CLASSIFIER_DROPOUT_2),
+            nn.Linear(256, num_classes)
+        )
         
-        # Create temporal distance matrix
-        utterance_expanded = utterance_ids.unsqueeze(-1).expand(-1, -1, seq_len)
-        utterance_transposed = utterance_ids.unsqueeze(1).expand(-1, seq_len, -1)
-        time_gaps = torch.abs(utterance_expanded - utterance_transposed)
-        
-        # Convert time gaps to weights (closer = higher weight)
-        temporal_weights = 1.0 / (1.0 + torch.log(time_gaps.float() + 1.0))
-        
-        # Create speaker identity matrix
-        speaker_expanded = speakers.unsqueeze(-1).expand(-1, -1, seq_len)
-        speaker_transposed = speakers.unsqueeze(1).expand(-1, seq_len, -1)
-        speaker_mask = (speaker_expanded == speaker_transposed).float()
-        
-        # Combine temporal and speaker weights
-        edge_weights = temporal_weights * (1.0 + 0.5 * speaker_mask)  # Boost same-speaker edges
-        
-        # Apply max time gap threshold
-        edge_weights = edge_weights * (time_gaps <= max_time_gap).float()
-        
-        return edge_weights
+        # Initialize weights properly
+        self._init_weights()
     
-    def forward(self, multimodal_features, utterance_ids, speakers, dialogue_lengths):
-        """
-        Args:
-            multimodal_features: [batch, max_seq_len, input_dim]
-            utterance_ids: [batch, max_seq_len] 
-            speakers: [batch, max_seq_len] (encoded speaker IDs)
-            dialogue_lengths: [batch] actual lengths of each dialogue
-        """
-        batch_size, max_seq_len, _ = multimodal_features.shape
+    def _init_weights(self):
+        """Initialize weights for better training stability"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+    
+    def forward(self, multimodal_features, utterance_ids=None, speakers=None, dialogue_lengths=None):
+        # Handle both single utterances and sequences
+        if multimodal_features.dim() == 2:
+            # Single utterance: (batch, features) -> add sequence dimension
+            multimodal_features = multimodal_features.unsqueeze(1)
         
-        # Project input features
-        node_features = self.input_proj(multimodal_features)  # [batch, seq_len, hidden_dim]
+        batch_size, seq_len, feature_dim = multimodal_features.shape
         
-        # Build dynamic edges
-        edge_weights = self.build_temporal_edges(utterance_ids, speakers)
+        # Step 1: Split multimodal features
+        text_features = multimodal_features[:, :, :768]      # First 768D for text
+        audio_features = multimodal_features[:, :, 768:768+168]  # Next 168D for audio
         
-        # Create attention mask for padding
-        attention_mask = self._create_attention_mask(dialogue_lengths, max_seq_len)
+        # Step 2: Text pathway processing
+        text_encoded = self.text_encoder(text_features)
+        text_gated, text_confidence = self.text_gating(text_encoded)
         
-        # Apply graph layers
-        attention_weights = []
-        for layer in self.graph_layers:
-            node_features, attn_weights = layer(
-                node_features, 
-                edge_weights, 
-                attention_mask
-            )
-            attention_weights.append(attn_weights)
+        # Step 3: Audio pathway processing  
+        audio_encoded = self.audio_encoder(audio_features)
+        audio_gated, audio_confidence = self.audio_gating(audio_encoded)
         
-        # Classification - use last layer features for each utterance
-        logits = self.classifier(node_features)
+        # Step 4: Early fusion
+        fused_features = torch.cat([text_gated, audio_gated], dim=-1)
+        
+        # Step 5: Cross-modal attention with dropout
+        cross_modal, attention_weights = self.cross_modal_attention(
+            fused_features, fused_features, fused_features
+        )
+        cross_modal = self.cross_modal_dropout(cross_modal)
+        
+        # Step 6: Context modeling with LSTM
+        context_out, (hidden, _) = self.context_lstm(cross_modal)
+        context_features = torch.cat([hidden[0], hidden[1]], dim=-1)
+        
+        # Step 7: Sequence aggregation (mean pooling)
+        sequence_representation = cross_modal.mean(dim=1)
+        
+        # Step 8: Final classification
+        combined_features = torch.cat([sequence_representation, context_features], dim=-1)
+        logits = self.classifier(combined_features)
         
         return {
             'logits': logits,
-            'node_features': node_features,
-            'attention_weights': attention_weights,
-            'edge_weights': edge_weights
+            'text_confidence': text_confidence,
+            'audio_confidence': audio_confidence,
+            'attention_weights': attention_weights
         }
-    
-    def _create_attention_mask(self, dialogue_lengths, max_seq_len):
-        """
-        Create attention mask to handle variable-length sequences
-        """
-        batch_size = len(dialogue_lengths)
-        mask = torch.ones(batch_size, max_seq_len, max_seq_len)
-        
-        for i, length in enumerate(dialogue_lengths):
-            mask[i, :, length:] = 0  # Mask out padding positions
-            mask[i, length:, :] = 0
-            
-        return mask.bool()
 
+# Update the main model wrapper to include M3F-Net
 class MultimodalERC(nn.Module):
-    """
-    Main wrapper class that can use either CAHME or DTGN architecture
-    """
     def __init__(self, config, architecture='cahme', num_classes=7):
         super().__init__()
         self.config = config
@@ -320,8 +276,8 @@ class MultimodalERC(nn.Module):
             self.model = ContextAwareHierarchicalMultimodalEncoder(
                 config, num_classes=num_classes
             )
-        elif architecture.lower() == 'dtgn':
-            self.model = DynamicTemporalGraphNetwork(
+        elif architecture.lower() == 'm3fnet':
+            self.model = M3FNet(
                 config, num_classes=num_classes
             )
         else:
