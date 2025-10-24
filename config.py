@@ -48,3 +48,20 @@ class Config:
     # Feature extraction settings
     SAVE_FORMAT = "pickle"  # or "numpy"
     VERBOSE = True
+
+    # Model architectures
+    MODEL_ARCHITECTURE = 'cahme'  # 'cahme' or 'dtgn'
+
+    # CAHME parameters
+    CONTEXT_WINDOW = 3
+    HIDDEN_DIM = 256
+
+    # DTGN parameters
+    GRAPH_LAYERS = 3
+    NUM_HEADS = 4
+    MAX_TIME_GAP = 5
+
+    # Training
+
+    # Model saving
+    MODEL_SAVE_DIR = "trained_models"

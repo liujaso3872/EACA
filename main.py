@@ -251,7 +251,6 @@ def test_config():
     print("=== Testing Configuration ===")
     print(f"Data directory: {Config.DATA_DIR}")
     print(f"Train CSV: {Config.TRAIN_CSV}")
-    print(f"Audio directory: {Config.AUDIO_DIR}")
     print(f"Emotion labels: {Config.EMOTION_LABELS}")
     print(f"Sentiment labels: {Config.SENTIMENT_LABELS}")
     print(f"Batch size: {Config.BATCH_SIZE}")
